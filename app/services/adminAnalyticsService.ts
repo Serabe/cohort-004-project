@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { db } from "~/db";
 import { purchases, enrollments, courses } from "~/db/schema";
-import type { TimePeriod } from "./analyticsService";
+import type { RevenueDataPoint, TimePeriod } from "~/services/analyticsService";
 
 export interface AdminAnalyticsSummary {
   totalRevenue: number;
@@ -25,6 +25,47 @@ function getStartDate(period: TimePeriod): string | null {
       break;
   }
   return now.toISOString();
+}
+
+function formatDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatMonthKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  return `${year}-${month}`;
+}
+
+function generateDailyKeys(startDate: Date, endDate: Date): string[] {
+  const keys: string[] = [];
+  const current = new Date(startDate);
+  current.setHours(0, 0, 0, 0);
+  const end = new Date(endDate);
+  end.setHours(0, 0, 0, 0);
+
+  while (current <= end) {
+    keys.push(formatDateKey(current));
+    current.setDate(current.getDate() + 1);
+  }
+
+  return keys;
+}
+
+function generateMonthlyKeys(startDate: Date, endDate: Date): string[] {
+  const keys: string[] = [];
+  const current = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+  const end = new Date(endDate.getFullYear(), endDate.getMonth(), 1);
+
+  while (current <= end) {
+    keys.push(formatMonthKey(current));
+    current.setMonth(current.getMonth() + 1);
+  }
+
+  return keys;
 }
 
 export function getAdminAnalyticsSummary(opts: {
@@ -66,4 +107,50 @@ export function getAdminAnalyticsSummary(opts: {
       ? { title: topCourseResult.title, revenue: topCourseResult.revenue }
       : null,
   };
+}
+
+export function getAdminRevenueTimeSeries(opts: {
+  period: TimePeriod;
+}): RevenueDataPoint[] {
+  const { period } = opts;
+  const now = new Date();
+  const startDate = getStartDate(period);
+  const useDaily = period === "7d" || period === "30d";
+
+  let rangeStart: Date;
+  if (startDate) {
+    rangeStart = new Date(startDate);
+  } else {
+    const earliest = db
+      .select({ minDate: sql<string | null>`min(${purchases.createdAt})` })
+      .from(purchases)
+      .get();
+
+    if (!earliest?.minDate) return [];
+    rangeStart = new Date(earliest.minDate);
+  }
+
+  const keys = useDaily
+    ? generateDailyKeys(rangeStart, now)
+    : generateMonthlyKeys(rangeStart, now);
+  const groupExpr = useDaily
+    ? sql<string>`substr(${purchases.createdAt}, 1, 10)`
+    : sql<string>`substr(${purchases.createdAt}, 1, 7)`;
+
+  const rows = db
+    .select({
+      dateKey: groupExpr,
+      revenue: sql<number>`coalesce(sum(${purchases.pricePaid}), 0)`,
+    })
+    .from(purchases)
+    .where(startDate ? sql`${purchases.createdAt} >= ${startDate}` : sql`1 = 1`)
+    .groupBy(groupExpr)
+    .all();
+
+  const revenueByDate = new Map(rows.map((row) => [row.dateKey, row.revenue]));
+
+  return keys.map((key) => ({
+    date: key,
+    revenue: revenueByDate.get(key) ?? 0,
+  }));
 }
