@@ -52,10 +52,14 @@ export async function loader({ request }: Route.LoaderArgs) {
     : [];
 
   const isInstructor = currentUser?.role === UserRole.Instructor;
+  const userIsTeamAdmin = currentUserId ? isTeamAdmin(currentUserId) : false;
+  const showNotifications = isInstructor || userIsTeamAdmin;
   const notifications =
-    isInstructor && currentUserId ? getNotifications(currentUserId, 5, 0) : [];
+    showNotifications && currentUserId
+      ? getNotifications(currentUserId, 5, 0)
+      : [];
   const notificationUnreadCount =
-    isInstructor && currentUserId ? getUnreadCount(currentUserId) : 0;
+    showNotifications && currentUserId ? getUnreadCount(currentUserId) : 0;
 
   return {
     users: users.map((u) => ({ id: u.id, name: u.name, role: u.role })),
@@ -71,7 +75,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     devCountry,
     countryTierInfo,
     countries: COUNTRIES,
-    isTeamAdmin: currentUserId ? isTeamAdmin(currentUserId) : false,
+    isTeamAdmin: userIsTeamAdmin,
     notifications,
     notificationUnreadCount,
   };
