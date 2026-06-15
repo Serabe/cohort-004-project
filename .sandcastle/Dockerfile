@@ -25,10 +25,27 @@ ARG AGENT_GID=1000
 RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
 USER ${AGENT_UID}:${AGENT_GID}
 
-# Install Claude Code CLI
-RUN curl -fsSL https://claude.ai/install.sh | bash
+# Install Codex CLI
+ARG CODEX_VERSION=0.138.0
+RUN set -eux; \
+  case "$(uname -m)" in \
+    aarch64|arm64) target="aarch64-unknown-linux-musl" ;; \
+    x86_64|amd64) target="x86_64-unknown-linux-musl" ;; \
+    *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+  esac; \
+  asset="codex-package-${target}.tar.gz"; \
+  digest="$(curl -fsSL "https://api.github.com/repos/openai/codex/releases/tags/rust-v${CODEX_VERSION}" \
+    | jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .digest' \
+    | sed 's/^sha256://')"; \
+  test -n "$digest"; \
+  curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/${asset}" -o /tmp/codex.tar.gz; \
+  echo "$digest  /tmp/codex.tar.gz" | sha256sum -c -; \
+  mkdir -p /home/agent/.local/codex /home/agent/.local/bin; \
+  tar -xzf /tmp/codex.tar.gz -C /home/agent/.local/codex; \
+  ln -sf /home/agent/.local/codex/bin/codex /home/agent/.local/bin/codex; \
+  /home/agent/.local/bin/codex --version
 
-# Add Claude to PATH
+# Add Codex to PATH
 ENV PATH="/home/agent/.local/bin:$PATH"
 
 WORKDIR /home/agent
