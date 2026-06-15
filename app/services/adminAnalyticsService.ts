@@ -1,12 +1,37 @@
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "~/db";
-import { purchases, enrollments, courses } from "~/db/schema";
+import {
+  purchases,
+  enrollments,
+  courseRatings,
+  courses,
+  users,
+} from "~/db/schema";
 import type { RevenueDataPoint, TimePeriod } from "~/services/analyticsService";
 
 export interface AdminAnalyticsSummary {
   totalRevenue: number;
   totalEnrollments: number;
   topCourse: { title: string; revenue: number } | null;
+}
+
+export interface AdminAnalyticsInstructor {
+  id: number;
+  name: string;
+}
+
+export interface AdminCourseAnalytics {
+  courseId: number;
+  title: string;
+  slug: string;
+  instructorId: number;
+  instructorName: string;
+  listPrice: number;
+  revenue: number;
+  salesCount: number;
+  enrollmentCount: number;
+  averageRating: number | null;
+  ratingCount: number;
 }
 
 function getStartDate(period: TimePeriod): string | null {
@@ -153,4 +178,94 @@ export function getAdminRevenueTimeSeries(opts: {
     date: key,
     revenue: revenueByDate.get(key) ?? 0,
   }));
+}
+
+export function getAdminAnalyticsInstructors(): AdminAnalyticsInstructor[] {
+  return db
+    .select({
+      id: users.id,
+      name: users.name,
+    })
+    .from(users)
+    .innerJoin(courses, eq(courses.instructorId, users.id))
+    .groupBy(users.id)
+    .orderBy(users.name)
+    .all();
+}
+
+export function getAdminCourseBreakdown(opts: {
+  period: TimePeriod;
+  instructorId?: number;
+}): AdminCourseAnalytics[] {
+  const startDate = getStartDate(opts.period);
+  const courseRows = db
+    .select({
+      id: courses.id,
+      title: courses.title,
+      slug: courses.slug,
+      price: courses.price,
+      instructorId: users.id,
+      instructorName: users.name,
+    })
+    .from(courses)
+    .innerJoin(users, eq(courses.instructorId, users.id))
+    .where(
+      opts.instructorId
+        ? eq(courses.instructorId, opts.instructorId)
+        : sql`1 = 1`
+    )
+    .orderBy(courses.title)
+    .all();
+
+  return courseRows.map((course) => {
+    const purchaseResult = db
+      .select({
+        revenue: sql<number>`coalesce(sum(${purchases.pricePaid}), 0)`,
+        salesCount: sql<number>`count(*)`,
+      })
+      .from(purchases)
+      .where(
+        startDate
+          ? sql`${purchases.courseId} = ${course.id} AND ${purchases.createdAt} >= ${startDate}`
+          : eq(purchases.courseId, course.id)
+      )
+      .get();
+
+    const enrollmentResult = db
+      .select({ count: sql<number>`count(*)` })
+      .from(enrollments)
+      .where(
+        startDate
+          ? sql`${enrollments.courseId} = ${course.id} AND ${enrollments.enrolledAt} >= ${startDate}`
+          : eq(enrollments.courseId, course.id)
+      )
+      .get();
+
+    const ratingResult = db
+      .select({
+        average: sql<number | null>`avg(${courseRatings.rating})`,
+        count: sql<number>`count(*)`,
+      })
+      .from(courseRatings)
+      .where(
+        startDate
+          ? sql`${courseRatings.courseId} = ${course.id} AND ${courseRatings.createdAt} >= ${startDate}`
+          : eq(courseRatings.courseId, course.id)
+      )
+      .get();
+
+    return {
+      courseId: course.id,
+      title: course.title,
+      slug: course.slug,
+      instructorId: course.instructorId,
+      instructorName: course.instructorName,
+      listPrice: course.price,
+      revenue: purchaseResult?.revenue ?? 0,
+      salesCount: purchaseResult?.salesCount ?? 0,
+      enrollmentCount: enrollmentResult?.count ?? 0,
+      averageRating: ratingResult?.average ?? null,
+      ratingCount: ratingResult?.count ?? 0,
+    };
+  });
 }

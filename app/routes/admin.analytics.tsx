@@ -10,17 +10,27 @@ import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
 import { UserRole } from "~/db/schema";
 import {
+  getAdminAnalyticsInstructors,
   getAdminAnalyticsSummary,
+  getAdminCourseBreakdown,
   getAdminRevenueTimeSeries,
 } from "~/services/adminAnalyticsService";
 import type { TimePeriod } from "~/services/analyticsService";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 import { cn, formatPrice } from "~/lib/utils";
 import {
   AlertTriangle,
   DollarSign,
   PackageOpen,
+  Star,
   Trophy,
   Users,
 } from "lucide-react";
@@ -76,15 +86,35 @@ export async function loader({ request }: Route.LoaderArgs) {
   const period: TimePeriod = VALID_PERIODS.includes(periodParam as TimePeriod)
     ? (periodParam as TimePeriod)
     : "30d";
+  const instructors = getAdminAnalyticsInstructors();
+  const instructorParam = Number(url.searchParams.get("instructor"));
+  const instructorId = instructors.some(({ id }) => id === instructorParam)
+    ? instructorParam
+    : undefined;
 
   const summary = getAdminAnalyticsSummary({ period });
   const timeSeries = getAdminRevenueTimeSeries({ period });
+  const courseBreakdown = getAdminCourseBreakdown({ period, instructorId });
 
-  return { summary, timeSeries, period };
+  return {
+    summary,
+    timeSeries,
+    courseBreakdown,
+    instructors,
+    instructorId: instructorId ?? null,
+    period,
+  };
 }
 
 export default function AdminAnalytics({ loaderData }: Route.ComponentProps) {
-  const { summary, timeSeries, period } = loaderData;
+  const {
+    summary,
+    timeSeries,
+    courseBreakdown,
+    instructors,
+    instructorId,
+    period,
+  } = loaderData;
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
@@ -94,7 +124,18 @@ export default function AdminAnalytics({ loaderData }: Route.ComponentProps) {
     navigate(`?${params.toString()}`, { replace: true });
   }
 
+  function handleInstructorChange(value: string) {
+    const params = new URLSearchParams(searchParams);
+    if (value === "all") {
+      params.delete("instructor");
+    } else {
+      params.set("instructor", value);
+    }
+    navigate(`?${params.toString()}`, { replace: true });
+  }
+
   const hasData =
+    courseBreakdown.length > 0 ||
     summary.totalRevenue > 0 ||
     summary.totalEnrollments > 0 ||
     summary.topCourse !== null;
@@ -256,6 +297,99 @@ export default function AdminAnalytics({ loaderData }: Route.ComponentProps) {
                 ) : (
                   <div className="flex h-[300px] items-center justify-center text-muted-foreground">
                     No revenue data for this period.
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between gap-4">
+                <CardTitle>Course Breakdown</CardTitle>
+                <Select
+                  value={instructorId?.toString() ?? "all"}
+                  onValueChange={handleInstructorChange}
+                >
+                  <SelectTrigger className="w-52">
+                    <SelectValue placeholder="All Instructors" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Instructors</SelectItem>
+                    {instructors.map((instructor) => (
+                      <SelectItem
+                        key={instructor.id}
+                        value={instructor.id.toString()}
+                      >
+                        {instructor.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </CardHeader>
+              <CardContent>
+                {courseBreakdown.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b text-left">
+                          <th className="pb-3 pr-4 font-medium">Course</th>
+                          <th className="pb-3 pr-4 font-medium">Instructor</th>
+                          <th className="pb-3 pr-4 text-right font-medium">
+                            List Price
+                          </th>
+                          <th className="pb-3 pr-4 text-right font-medium">
+                            Revenue
+                          </th>
+                          <th className="pb-3 pr-4 text-right font-medium">
+                            Sales
+                          </th>
+                          <th className="pb-3 pr-4 text-right font-medium">
+                            Enrollments
+                          </th>
+                          <th className="pb-3 text-right font-medium">
+                            Rating
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {courseBreakdown.map((course) => (
+                          <tr
+                            key={course.courseId}
+                            className="border-b last:border-0"
+                          >
+                            <td className="py-3 pr-4 font-medium">
+                              {course.title}
+                            </td>
+                            <td className="py-3 pr-4">
+                              {course.instructorName}
+                            </td>
+                            <td className="py-3 pr-4 text-right">
+                              {formatPrice(course.listPrice)}
+                            </td>
+                            <td className="py-3 pr-4 text-right">
+                              {formatPrice(course.revenue)}
+                            </td>
+                            <td className="py-3 pr-4 text-right">
+                              {course.salesCount.toLocaleString()}
+                            </td>
+                            <td className="py-3 pr-4 text-right">
+                              {course.enrollmentCount.toLocaleString()}
+                            </td>
+                            <td className="py-3 text-right">
+                              <span className="inline-flex items-center gap-1">
+                                <Star className="size-3 fill-current" />
+                                {course.averageRating !== null
+                                  ? course.averageRating.toFixed(1)
+                                  : "N/A"}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="py-8 text-center text-sm text-muted-foreground">
+                    No courses found for this instructor.
                   </div>
                 )}
               </CardContent>
