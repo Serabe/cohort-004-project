@@ -1,6 +1,17 @@
 import { useState, useRef, useEffect } from "react";
+import type { ReactNode } from "react";
 import { Link, useFetcher } from "react-router";
 import { toast } from "sonner";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import {
   DragDropContext,
   Droppable,
@@ -36,12 +47,17 @@ import {
 import { getEnrollmentCountForCourse, getCourseEnrolledStudents } from "~/services/enrollmentService";
 import { calculateProgress } from "~/services/progressService";
 import { getQuizByLessonId, getBestAttempt } from "~/services/quizService";
+import {
+  getCourseAnalytics,
+  type CourseAnalyticsDetail,
+  type QuizHistogramBin,
+} from "~/services/analyticsService";
 import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
 import { CourseStatus, UserRole } from "~/db/schema";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { MonacoMarkdownEditor } from "~/components/monaco-markdown-editor";
-import { Card, CardContent, CardHeader } from "~/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
@@ -69,6 +85,9 @@ import {
   Award,
   Globe,
   FileText,
+  BarChart3,
+  DollarSign,
+  Percent,
 } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
@@ -184,8 +203,9 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   });
 
   const quizCount = lessonQuizzes.length;
+  const analytics = getCourseAnalytics({ courseId });
 
-  return { course, lessonCount, enrollmentCount, students, quizCount };
+  return { course, lessonCount, enrollmentCount, students, quizCount, analytics };
 }
 
 export async function action({ params, request }: Route.ActionArgs) {
@@ -981,10 +1001,215 @@ function statusBadgeColor(status: string) {
   }
 }
 
+function formatPercent(value: number): string {
+  return `${Math.round(value)}%`;
+}
+
+function chartPercentTick(value: number): string {
+  return `${value}%`;
+}
+
+function scorePercentLabel(score: number): string {
+  return `${Math.round(score * 100)}%`;
+}
+
+function quizReferenceLinePosition(bins: QuizHistogramBin[], passingScore: number) {
+  const index = Math.min(9, Math.max(0, Math.floor(passingScore * 10)));
+  return bins[index]?.label ?? "90-100%";
+}
+
+function AnalyticsStatCard({
+  label,
+  value,
+  icon,
+}: {
+  label: string;
+  value: string;
+  icon: ReactNode;
+}) {
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between pb-2">
+        <CardTitle className="text-sm font-medium text-muted-foreground">
+          {label}
+        </CardTitle>
+        <div className="text-muted-foreground">{icon}</div>
+      </CardHeader>
+      <CardContent>
+        <div className="text-2xl font-bold">{value}</div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function CourseAnalyticsTab({
+  analytics,
+}: {
+  analytics: CourseAnalyticsDetail;
+}) {
+  const lessonChartData = analytics.lessonFunnel.map((lesson, index) => ({
+    ...lesson,
+    chartLabel: `${index + 1}. ${lesson.lessonTitle}`,
+  }));
+
+  return (
+    <div className="space-y-6">
+      <div className="grid gap-4 md:grid-cols-3">
+        <AnalyticsStatCard
+          label="Enrollments"
+          value={analytics.summary.enrollmentCount.toLocaleString()}
+          icon={<Users className="size-4" />}
+        />
+        <AnalyticsStatCard
+          label="Gross Revenue"
+          value={formatPrice(analytics.summary.grossRevenue)}
+          icon={<DollarSign className="size-4" />}
+        />
+        <AnalyticsStatCard
+          label="Completion Rate"
+          value={formatPercent(analytics.summary.completionRate)}
+          icon={<Percent className="size-4" />}
+        />
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Lesson Completion Funnel</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {lessonChartData.length === 0 ? (
+            <div className="flex h-[260px] items-center justify-center text-sm text-muted-foreground">
+              Add lessons to see completion data.
+            </div>
+          ) : (
+            <div className="h-[360px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart
+                  data={lessonChartData}
+                  layout="vertical"
+                  margin={{ top: 8, right: 24, bottom: 8, left: 24 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                  <XAxis
+                    type="number"
+                    domain={[0, 100]}
+                    tickFormatter={chartPercentTick}
+                    tick={{ fontSize: 12, fill: "var(--muted-foreground)" }}
+                    tickLine={false}
+                    axisLine={false}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="chartLabel"
+                    width={180}
+                    tick={{ fontSize: 12, fill: "var(--muted-foreground)" }}
+                    tickLine={false}
+                    axisLine={false}
+                  />
+                  <Tooltip
+                    formatter={(value, name) => [
+                      `${value}%`,
+                      name === "completionRate" ? "Completed" : name,
+                    ]}
+                    labelFormatter={(_, payload) => {
+                      const row = payload[0]?.payload;
+                      return row ? `${row.moduleTitle}: ${row.lessonTitle}` : "Lesson";
+                    }}
+                    contentStyle={{
+                      backgroundColor: "var(--card)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "var(--radius)",
+                    }}
+                  />
+                  <Bar
+                    dataKey="completionRate"
+                    fill="var(--primary)"
+                    radius={[0, 4, 4, 0]}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {analytics.quizHistograms.length > 0 && (
+        <div className="space-y-4">
+          <h2 className="text-lg font-semibold">Quiz Score Distributions</h2>
+
+          {analytics.quizHistograms.map((quiz) => (
+            <Card key={quiz.quizId}>
+              <CardHeader>
+                <CardTitle>{quiz.quizTitle}</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  {quiz.lessonTitle} · {quiz.attemptedStudentCount}{" "}
+                  {quiz.attemptedStudentCount === 1 ? "student" : "students"}{" "}
+                  attempted · Passing score {scorePercentLabel(quiz.passingScore)}
+                </p>
+              </CardHeader>
+              <CardContent>
+                <div className="h-[260px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={quiz.bins}
+                      margin={{ top: 8, right: 24, bottom: 8, left: 8 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                      <XAxis
+                        dataKey="label"
+                        tick={{ fontSize: 12, fill: "var(--muted-foreground)" }}
+                        tickLine={false}
+                        axisLine={false}
+                      />
+                      <YAxis
+                        allowDecimals={false}
+                        tick={{ fontSize: 12, fill: "var(--muted-foreground)" }}
+                        tickLine={false}
+                        axisLine={false}
+                      />
+                      <Tooltip
+                        formatter={(value) => [
+                          value,
+                          value === 1 ? "Student" : "Students",
+                        ]}
+                        labelFormatter={(label) => `Score: ${label}`}
+                        contentStyle={{
+                          backgroundColor: "var(--card)",
+                          border: "1px solid var(--border)",
+                          borderRadius: "var(--radius)",
+                        }}
+                      />
+                      <ReferenceLine
+                        x={quizReferenceLinePosition(quiz.bins, quiz.passingScore)}
+                        stroke="var(--destructive)"
+                        strokeDasharray="4 4"
+                        label={{
+                          value: "Pass",
+                          fill: "var(--destructive)",
+                          fontSize: 12,
+                        }}
+                      />
+                      <Bar
+                        dataKey="count"
+                        fill="var(--primary)"
+                        radius={[4, 4, 0, 0]}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function InstructorCourseEditor({
   loaderData,
 }: Route.ComponentProps) {
-  const { course, lessonCount, enrollmentCount, students, quizCount } = loaderData;
+  const { course, lessonCount, enrollmentCount, students, quizCount, analytics } = loaderData;
   const statusFetcher = useFetcher();
   const reorderFetcher = useFetcher();
   const lessonReorderFetcher = useFetcher();
@@ -1192,6 +1417,10 @@ export default function InstructorCourseEditor({
           <TabsTrigger value="students">
             <Users className="size-4" />
             Students
+          </TabsTrigger>
+          <TabsTrigger value="analytics">
+            <BarChart3 className="size-4" />
+            Analytics
           </TabsTrigger>
         </TabsList>
 
@@ -1651,6 +1880,11 @@ export default function InstructorCourseEditor({
               </CardContent>
             </Card>
           )}
+        </TabsContent>
+
+        {/* Analytics Tab */}
+        <TabsContent value="analytics" className="mt-6">
+          <CourseAnalyticsTab analytics={analytics} />
         </TabsContent>
       </Tabs>
     </div>

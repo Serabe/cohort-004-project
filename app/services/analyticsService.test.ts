@@ -15,8 +15,52 @@ import {
   getAnalyticsSummary,
   getRevenueTimeSeries,
   getPerCourseBreakdown,
+  getCourseAnalytics,
   type TimePeriod,
 } from "./analyticsService";
+
+function createModuleWithLessons(opts: {
+  courseId: number;
+  moduleTitle: string;
+  modulePosition: number;
+  lessonTitles: string[];
+}) {
+  const mod = testDb
+    .insert(schema.modules)
+    .values({
+      courseId: opts.courseId,
+      title: opts.moduleTitle,
+      position: opts.modulePosition,
+    })
+    .returning()
+    .get();
+
+  const lessons = opts.lessonTitles.map((title, index) =>
+    testDb
+      .insert(schema.lessons)
+      .values({
+        moduleId: mod.id,
+        title,
+        position: index + 1,
+      })
+      .returning()
+      .get()
+  );
+
+  return { module: mod, lessons };
+}
+
+function createStudent(email: string) {
+  return testDb
+    .insert(schema.users)
+    .values({
+      name: email,
+      email,
+      role: schema.UserRole.Student,
+    })
+    .returning()
+    .get();
+}
 
 describe("analyticsService", () => {
   beforeEach(() => {
@@ -866,6 +910,198 @@ describe("analyticsService", () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].courseId).toBe(base.course.id);
+    });
+  });
+
+  describe("getCourseAnalytics", () => {
+    it("returns zero metrics and empty chart data for a course with no enrollments", () => {
+      const result = getCourseAnalytics({ courseId: base.course.id });
+
+      expect(result.summary).toEqual({
+        enrollmentCount: 0,
+        grossRevenue: 0,
+        completionRate: 0,
+      });
+      expect(result.lessonFunnel).toEqual([]);
+      expect(result.quizHistograms).toEqual([]);
+    });
+
+    it("sums gross revenue from actual purchase prices", () => {
+      testDb
+        .insert(schema.purchases)
+        .values([
+          {
+            userId: base.user.id,
+            courseId: base.course.id,
+            pricePaid: 4999,
+            country: "US",
+          },
+          {
+            userId: base.instructor.id,
+            courseId: base.course.id,
+            pricePaid: 2500,
+            country: "IN",
+          },
+        ])
+        .run();
+
+      const result = getCourseAnalytics({ courseId: base.course.id });
+
+      expect(result.summary.grossRevenue).toBe(7499);
+    });
+
+    it("counts completion rate from enrollments with completedAt", () => {
+      const student2 = createStudent("second@example.com");
+      const student3 = createStudent("third@example.com");
+
+      testDb
+        .insert(schema.enrollments)
+        .values([
+          {
+            userId: base.user.id,
+            courseId: base.course.id,
+            completedAt: "2026-01-01T00:00:00.000Z",
+          },
+          {
+            userId: student2.id,
+            courseId: base.course.id,
+            completedAt: null,
+          },
+          {
+            userId: student3.id,
+            courseId: base.course.id,
+            completedAt: "2026-01-02T00:00:00.000Z",
+          },
+        ])
+        .run();
+
+      const result = getCourseAnalytics({ courseId: base.course.id });
+
+      expect(result.summary.enrollmentCount).toBe(3);
+      expect(result.summary.completionRate).toBe(67);
+    });
+
+    it("returns lesson completion percentages in module and lesson position order", () => {
+      const lateModule = createModuleWithLessons({
+        courseId: base.course.id,
+        moduleTitle: "Second Module",
+        modulePosition: 2,
+        lessonTitles: ["Third"],
+      });
+      const earlyModule = createModuleWithLessons({
+        courseId: base.course.id,
+        moduleTitle: "First Module",
+        modulePosition: 1,
+        lessonTitles: ["First", "Second"],
+      });
+      const student2 = createStudent("second@example.com");
+      const unEnrolledStudent = createStudent("not-enrolled@example.com");
+
+      testDb
+        .insert(schema.enrollments)
+        .values([
+          { userId: base.user.id, courseId: base.course.id },
+          { userId: student2.id, courseId: base.course.id },
+        ])
+        .run();
+
+      testDb
+        .insert(schema.lessonProgress)
+        .values([
+          {
+            userId: base.user.id,
+            lessonId: earlyModule.lessons[0].id,
+            status: schema.LessonProgressStatus.Completed,
+            completedAt: "2026-01-01T00:00:00.000Z",
+          },
+          {
+            userId: base.user.id,
+            lessonId: earlyModule.lessons[1].id,
+            status: schema.LessonProgressStatus.Completed,
+            completedAt: "2026-01-01T00:00:00.000Z",
+          },
+          {
+            userId: student2.id,
+            lessonId: earlyModule.lessons[0].id,
+            status: schema.LessonProgressStatus.Completed,
+            completedAt: "2026-01-01T00:00:00.000Z",
+          },
+          {
+            userId: student2.id,
+            lessonId: lateModule.lessons[0].id,
+            status: schema.LessonProgressStatus.InProgress,
+            completedAt: null,
+          },
+          {
+            userId: unEnrolledStudent.id,
+            lessonId: earlyModule.lessons[1].id,
+            status: schema.LessonProgressStatus.Completed,
+            completedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ])
+        .run();
+
+      const result = getCourseAnalytics({ courseId: base.course.id });
+
+      expect(result.lessonFunnel.map((lesson) => lesson.lessonTitle)).toEqual([
+        "First",
+        "Second",
+        "Third",
+      ]);
+      expect(
+        result.lessonFunnel.map((lesson) => lesson.completionRate)
+      ).toEqual([100, 50, 0]);
+    });
+
+    it("returns quiz histograms using each enrolled student's best score", () => {
+      const { lessons } = createModuleWithLessons({
+        courseId: base.course.id,
+        moduleTitle: "Quiz Module",
+        modulePosition: 1,
+        lessonTitles: ["Quiz Lesson"],
+      });
+      const student2 = createStudent("second@example.com");
+
+      testDb
+        .insert(schema.enrollments)
+        .values([
+          { userId: base.user.id, courseId: base.course.id },
+          { userId: student2.id, courseId: base.course.id },
+        ])
+        .run();
+
+      const quiz = testDb
+        .insert(schema.quizzes)
+        .values({
+          lessonId: lessons[0].id,
+          title: "Readiness Quiz",
+          passingScore: 0.7,
+        })
+        .returning()
+        .get();
+
+      testDb
+        .insert(schema.quizAttempts)
+        .values([
+          { userId: base.user.id, quizId: quiz.id, score: 0.2, passed: false },
+          { userId: base.user.id, quizId: quiz.id, score: 0.85, passed: true },
+          { userId: student2.id, quizId: quiz.id, score: 0.74, passed: true },
+        ])
+        .run();
+
+      const result = getCourseAnalytics({ courseId: base.course.id });
+
+      expect(result.quizHistograms).toHaveLength(1);
+      expect(result.quizHistograms[0]).toMatchObject({
+        quizId: quiz.id,
+        quizTitle: "Readiness Quiz",
+        lessonTitle: "Quiz Lesson",
+        passingScore: 0.7,
+        attemptedStudentCount: 2,
+      });
+      expect(result.quizHistograms[0].bins.map((bin) => bin.count)).toEqual([
+        0, 0, 0, 0, 0, 0, 0, 1, 1, 0,
+      ]);
     });
   });
 });

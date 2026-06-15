@@ -1,6 +1,17 @@
-import { sql, eq } from "drizzle-orm";
+import { sql, eq, asc } from "drizzle-orm";
 import { db } from "~/db";
-import { purchases, enrollments, courseRatings, courses } from "~/db/schema";
+import {
+  purchases,
+  enrollments,
+  courseRatings,
+  courses,
+  modules,
+  lessons,
+  lessonProgress,
+  quizzes,
+  quizAttempts,
+  LessonProgressStatus,
+} from "~/db/schema";
 
 // ─── Analytics Service ───
 // Encapsulates all database query logic for the instructor analytics dashboard.
@@ -13,6 +24,42 @@ export interface AnalyticsSummary {
   totalEnrollments: number;
   averageRating: number | null;
   ratingCount: number;
+}
+
+export interface CourseAnalyticsSummary {
+  enrollmentCount: number;
+  grossRevenue: number;
+  completionRate: number;
+}
+
+export interface LessonFunnelPoint {
+  lessonId: number;
+  lessonTitle: string;
+  moduleTitle: string;
+  completedCount: number;
+  completionRate: number;
+}
+
+export interface QuizHistogramBin {
+  minScore: number;
+  maxScore: number;
+  label: string;
+  count: number;
+}
+
+export interface QuizScoreHistogram {
+  quizId: number;
+  quizTitle: string;
+  lessonTitle: string;
+  passingScore: number;
+  attemptedStudentCount: number;
+  bins: QuizHistogramBin[];
+}
+
+export interface CourseAnalyticsDetail {
+  summary: CourseAnalyticsSummary;
+  lessonFunnel: LessonFunnelPoint[];
+  quizHistograms: QuizScoreHistogram[];
 }
 
 function getStartDate(period: TimePeriod): string | null {
@@ -31,6 +78,159 @@ function getStartDate(period: TimePeriod): string | null {
       break;
   }
   return now.toISOString();
+}
+
+function toPercent(numerator: number, denominator: number): number {
+  if (denominator === 0) return 0;
+  return Math.round((numerator / denominator) * 100);
+}
+
+function createHistogramBins(): QuizHistogramBin[] {
+  return Array.from({ length: 10 }, (_, index) => {
+    const minScore = index / 10;
+    const maxScore = (index + 1) / 10;
+    return {
+      minScore,
+      maxScore,
+      label: `${index * 10}-${(index + 1) * 10}%`,
+      count: 0,
+    };
+  });
+}
+
+function scoreToBinIndex(score: number): number {
+  return Math.min(9, Math.max(0, Math.floor(score * 10)));
+}
+
+export function getCourseAnalytics(opts: {
+  courseId: number;
+}): CourseAnalyticsDetail {
+  const { courseId } = opts;
+
+  const enrollmentRows = db
+    .select({
+      userId: enrollments.userId,
+      completedAt: enrollments.completedAt,
+    })
+    .from(enrollments)
+    .where(eq(enrollments.courseId, courseId))
+    .all();
+
+  const enrollmentCount = enrollmentRows.length;
+  const completedEnrollmentCount = enrollmentRows.filter(
+    (enrollment) => enrollment.completedAt !== null
+  ).length;
+
+  const revenueResult = db
+    .select({ total: sql<number>`coalesce(sum(${purchases.pricePaid}), 0)` })
+    .from(purchases)
+    .where(eq(purchases.courseId, courseId))
+    .get();
+
+  const courseLessons = db
+    .select({
+      lessonId: lessons.id,
+      lessonTitle: lessons.title,
+      moduleTitle: modules.title,
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(eq(modules.courseId, courseId))
+    .orderBy(asc(modules.position), asc(lessons.position))
+    .all();
+
+  const userIds = new Set(
+    enrollmentRows.map((enrollment) => enrollment.userId)
+  );
+
+  const lessonFunnel = courseLessons.map((lesson) => {
+    const completedRows = db
+      .select({
+        userId: lessonProgress.userId,
+        status: lessonProgress.status,
+      })
+      .from(lessonProgress)
+      .where(eq(lessonProgress.lessonId, lesson.lessonId))
+      .all();
+
+    const completedUserIds = new Set(
+      completedRows
+        .filter(
+          (progress) =>
+            userIds.has(progress.userId) &&
+            progress.status === LessonProgressStatus.Completed
+        )
+        .map((progress) => progress.userId)
+    );
+    const completedCount = completedUserIds.size;
+
+    return {
+      lessonId: lesson.lessonId,
+      lessonTitle: lesson.lessonTitle,
+      moduleTitle: lesson.moduleTitle,
+      completedCount,
+      completionRate: toPercent(completedCount, enrollmentCount),
+    };
+  });
+
+  const courseQuizzes = db
+    .select({
+      quizId: quizzes.id,
+      quizTitle: quizzes.title,
+      passingScore: quizzes.passingScore,
+      lessonTitle: lessons.title,
+    })
+    .from(quizzes)
+    .innerJoin(lessons, eq(quizzes.lessonId, lessons.id))
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(eq(modules.courseId, courseId))
+    .orderBy(asc(modules.position), asc(lessons.position))
+    .all();
+
+  const quizHistograms = courseQuizzes.map((quiz) => {
+    const bestScoresByUser = new Map<number, number>();
+    const attempts = db
+      .select({
+        userId: quizAttempts.userId,
+        score: quizAttempts.score,
+      })
+      .from(quizAttempts)
+      .where(eq(quizAttempts.quizId, quiz.quizId))
+      .all();
+
+    for (const attempt of attempts) {
+      if (!userIds.has(attempt.userId)) continue;
+
+      const previousBest = bestScoresByUser.get(attempt.userId);
+      if (previousBest === undefined || attempt.score > previousBest) {
+        bestScoresByUser.set(attempt.userId, attempt.score);
+      }
+    }
+
+    const bins = createHistogramBins();
+    for (const score of bestScoresByUser.values()) {
+      bins[scoreToBinIndex(score)].count += 1;
+    }
+
+    return {
+      quizId: quiz.quizId,
+      quizTitle: quiz.quizTitle,
+      lessonTitle: quiz.lessonTitle,
+      passingScore: quiz.passingScore,
+      attemptedStudentCount: bestScoresByUser.size,
+      bins,
+    };
+  });
+
+  return {
+    summary: {
+      enrollmentCount,
+      grossRevenue: revenueResult?.total ?? 0,
+      completionRate: toPercent(completedEnrollmentCount, enrollmentCount),
+    },
+    lessonFunnel,
+    quizHistograms,
+  };
 }
 
 export function getAnalyticsSummary(opts: {
