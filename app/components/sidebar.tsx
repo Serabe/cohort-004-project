@@ -103,6 +103,12 @@ const navItems: NavItem[] = [
     icon: <Tag className="size-4" />,
     roles: [UserRole.Admin],
   },
+  {
+    label: "Analytics",
+    to: "/admin/analytics",
+    icon: <BarChart3 className="size-4" />,
+    roles: [UserRole.Admin],
+  },
 ];
 
 function isVisible(item: NavItem, role: UserRole | null): boolean {
