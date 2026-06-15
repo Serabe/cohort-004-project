@@ -25,6 +25,10 @@ const db = drizzle(sqlite, { schema });
 
 // ─── Helpers ───
 
+type SqliteObjectName = {
+  name: string;
+};
+
 function daysAgo(n: number): string {
   const d = new Date();
   d.setDate(d.getDate() - n);
@@ -38,35 +42,40 @@ function slugify(title: string): string {
     .replace(/(^-|-$)/g, "");
 }
 
+function quoteSqlIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+function dropExistingTables() {
+  const existingTables = sqlite
+    .prepare(
+      `
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+      `
+    )
+    .all() as SqliteObjectName[];
+
+  sqlite.pragma("foreign_keys = OFF");
+
+  try {
+    for (const table of existingTables) {
+      sqlite.exec(`DROP TABLE IF EXISTS ${quoteSqlIdentifier(table.name)}`);
+    }
+  } finally {
+    sqlite.pragma("foreign_keys = ON");
+  }
+}
+
 // ─── Seed Data ───
 
 async function seed() {
   console.log("Seeding database...");
 
-  // Drop and recreate tables for a clean seed
-  sqlite.exec(`
-    DROP TABLE IF EXISTS lesson_bookmarks;
-    DROP TABLE IF EXISTS lesson_comments;
-    DROP TABLE IF EXISTS video_watch_events;
-    DROP TABLE IF EXISTS quiz_answers;
-    DROP TABLE IF EXISTS quiz_attempts;
-    DROP TABLE IF EXISTS quiz_options;
-    DROP TABLE IF EXISTS quiz_questions;
-    DROP TABLE IF EXISTS quizzes;
-    DROP TABLE IF EXISTS lesson_progress;
-    DROP TABLE IF EXISTS course_ratings;
-    DROP TABLE IF EXISTS coupons;
-    DROP TABLE IF EXISTS team_members;
-    DROP TABLE IF EXISTS teams;
-    DROP TABLE IF EXISTS purchases;
-    DROP TABLE IF EXISTS enrollments;
-    DROP TABLE IF EXISTS lessons;
-    DROP TABLE IF EXISTS modules;
-    DROP TABLE IF EXISTS courses;
-    DROP TABLE IF EXISTS categories;
-    DROP TABLE IF EXISTS users;
-    DROP TABLE IF EXISTS __drizzle_migrations;
-  `);
+  // Drop and recreate tables for a clean seed, including tables from older schema versions.
+  dropExistingTables();
 
   // Create tables using the same Drizzle migrations as the live database
   migrate(db, { migrationsFolder });
@@ -1742,4 +1751,11 @@ You've completed the Building REST APIs course. You now have the skills to build
   console.log("  Teams: 1 (with 5 coupons)");
 }
 
-seed().catch(console.error);
+seed()
+  .catch((error: unknown) => {
+    console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    sqlite.close();
+  });
